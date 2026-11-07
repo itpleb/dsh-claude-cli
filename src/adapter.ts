@@ -25,7 +25,7 @@ import {
   type LlmResolvedModelInfo,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
-import { runCli, type CliInvocation } from './cli.ts'
+import { runCli, resolveClaudeExecutable, type CliInvocation } from './cli.ts'
 import { UNSUPPORTED_CODE } from './failure.ts'
 import { contextWindowOf, displayNameOf, listCatalog, REASONING_EFFORTS } from './models.ts'
 import { renderConversation } from './render.ts'
@@ -89,7 +89,7 @@ const RESERVED_FLAGS: ReadonlySet<string> = new Set([
   '--disallowedTools', '--disallowed-tools',
   '--permission-mode', '--dangerously-skip-permissions',
   '--allow-dangerously-skip-permissions',
-  '--setting-sources', '--settings',
+  '--settings',
   '--add-dir', '--plugin-dir', '--agent', '--agents',
   '--bare', '--continue', '-c', '--resume', '-r',
 ])
@@ -139,6 +139,7 @@ function assertSupported(options: GenerateOptions, mode: 'error' | 'ignore'): vo
 /** Streams harness model calls through the locally installed Claude Code CLI. */
 export class ClaudeCliAdapter extends LlmAdapter {
   readonly #options: AdapterOptions
+  readonly #resolvedExecutable: string
 
   constructor(options: AdapterOptions) {
     super()
@@ -146,6 +147,17 @@ export class ClaudeCliAdapter extends LlmAdapter {
     // an unsafe `extraArgs` is broken at startup, not on its first model call.
     assertExtraArgsSafe(options.extraArgs)
     this.#options = options
+    // Resolve the executable synchronously at startup using a cached promise.
+    // The async resolution is kicked off immediately; the first stream() awaits it.
+    this.#resolvedExecutable = '' // placeholder, initialized async below
+    this.#resolveExecutable()
+  }
+
+  async #resolveExecutable(): Promise<void> {
+    if (this.#resolvedExecutable) return
+    const resolved = await resolveClaudeExecutable(this.#options.executable)
+    // @ts-expect-error - we mutate a readonly field once at startup
+    this.#resolvedExecutable = resolved
   }
 
   /**
@@ -196,7 +208,9 @@ export class ClaudeCliAdapter extends LlmAdapter {
    *   the request carries tools.
    * @returns executable, arguments, stdin payload, and environment.
    */
-  #invocation(options: GenerateOptions, manifestPath: string | undefined): CliInvocation {
+  async #invocation(options: GenerateOptions, manifestPath: string | undefined): Promise<CliInvocation> {
+    // Ensure executable is resolved (first request wins the race).
+    await this.#resolveExecutable()
     // `extraArgs` goes first and the adapter's own flags last, because the CLI
     // keeps the last occurrence of a repeated flag. Order is the guarantee:
     // even if a reserved flag ever slipped past validation, it could not win.
@@ -208,9 +222,8 @@ export class ClaudeCliAdapter extends LlmAdapter {
       '--include-partial-messages',
       '--verbose',
       '--no-session-persistence',
-      // The harness owns the prompt; the CLI's own settings, memory files, and
-      // configured MCP servers must not reach the model.
-      '--setting-sources', '',
+      // The harness owns the prompt; the CLI's own tools and MCP servers must not reach the model.
+      // Note: `--setting-sources ''` is intentionally omitted — it disables auth config too.
       '--strict-mcp-config',
       '--tools', '',
       // With no tools there is nothing to permit, so the mode only matters if
@@ -242,7 +255,7 @@ export class ClaudeCliAdapter extends LlmAdapter {
       },
     }
     return {
-      executable: this.#options.executable,
+      executable: this.#resolvedExecutable,
       args,
       stdinPayload: `${JSON.stringify(turn)}\n`,
       cwd: this.#options.cwd,
@@ -267,7 +280,7 @@ export class ClaudeCliAdapter extends LlmAdapter {
       await writeFile(manifestPath, JSON.stringify(spec.tools), 'utf8')
     }
 
-    const run = runCli(this.#invocation(options, manifestPath), {
+    const run = runCli(await this.#invocation(options, manifestPath), {
       ...options.signal === undefined ? {} : { signal: options.signal },
       idleTimeoutMs: this.#options.streamIdleTimeoutMs,
     })

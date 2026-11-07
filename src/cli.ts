@@ -11,15 +11,128 @@
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { access, constants } from 'node:fs/promises'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import { LlmError } from '@deepseek-ai/dsh-llm'
 import { ABORTED_CODE, CLI_NOT_FOUND_CODE, TIMEOUT_CODE } from './failure.ts'
 
 /** Grace period between `SIGTERM` and `SIGKILL`, in milliseconds. */
 const KILL_GRACE_MS = 2000
 
+/** Candidate paths for the `claude` executable by platform. */
+function claudeCandidatePaths(): string[] {
+  const home = homedir()
+  const isWin = process.platform === 'win32'
+  const exe = isWin ? 'claude.exe' : 'claude'
+
+  const candidates: string[] = []
+
+  // 1. User-local installs (most common)
+  if (!isWin) {
+    candidates.push(join(home, '.local', 'bin', exe))
+    candidates.push(join(home, 'bin', exe))
+  } else {
+    candidates.push(join(home, 'AppData', 'Local', 'Microsoft', 'WinGet', 'Links', exe))
+    candidates.push(join(home, 'scoop', 'shims', exe))
+    candidates.push(join(home, '.local', 'bin', exe))
+  }
+
+  // 2. npm/pnpm/yarn global prefixes
+  const npmPrefix = process.env.npm_config_prefix
+  if (npmPrefix) candidates.push(join(npmPrefix, 'bin', exe))
+  const pnpmHome = process.env.PNPM_HOME
+  if (pnpmHome) candidates.push(join(pnpmHome, exe))
+  const yarnGlobal = process.env.YARN_GLOBAL_FOLDER
+  if (yarnGlobal) candidates.push(join(yarnGlobal, 'node_modules', '.bin', exe))
+
+  // 3. Node version managers
+  const nvmDir = process.env.NVM_DIR
+  if (nvmDir) {
+    const nodeVersion = process.version
+    candidates.push(join(nvmDir, 'versions', 'node', nodeVersion, 'bin', exe))
+  }
+  const fnmDir = process.env.FNM_DIR
+  if (fnmDir) {
+    candidates.push(join(fnmDir, 'node-versions', process.version, 'installation', 'bin', exe))
+  }
+  const voltaHome = process.env.VOLTA_HOME
+  if (voltaHome) candidates.push(join(voltaHome, 'bin', exe))
+
+  // 4. System-wide (less common for claude)
+  if (!isWin) {
+    candidates.push(join('/usr', 'local', 'bin', exe))
+    candidates.push(join('/opt', 'homebrew', 'bin', exe)) // Apple Silicon Homebrew
+  }
+
+  return candidates
+}
+
+/**
+ * Resolve the `claude` executable path.
+ * Checks PATH first, then common install locations.
+ * @param explicit - user-configured path/command; if absolute or contains a path separator, used as-is.
+ * @returns absolute path to the executable.
+ * @throws LlmError `CLI_NOT_FOUND` with a diagnostic list of searched locations.
+ */
+export async function resolveClaudeExecutable(explicit: string): Promise<string> {
+  // If the user gave a path with a separator, treat it as a filesystem path.
+  if (explicit.includes('/') || explicit.includes('\\')) {
+    try {
+      await access(explicit, constants.X_OK)
+      return explicit
+    } catch {
+      throw new LlmError(
+        `The configured \`claude\` executable at "${explicit}" does not exist or is not executable.`,
+        CLI_NOT_FOUND_CODE,
+      )
+    }
+  }
+
+  // 1. Try PATH lookup via `command -v` / `where` equivalent.
+  // Node's spawn will do PATH resolution when given a bare command.
+  // We verify it exists by trying to spawn with `command -v` (unix) or `where` (windows).
+  const isWin = process.platform === 'win32'
+  try {
+    const checkCmd = isWin ? 'where' : 'command'
+    const checkArgs = isWin ? [explicit] : ['-v', explicit]
+    const { spawnSync } = await import('node:child_process')
+    const result = spawnSync(checkCmd, checkArgs, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+    const stdout = result.stdout?.trim()
+    if (result.status === 0 && stdout && stdout.length > 0) {
+      return stdout.split('\n')[0]!
+    }
+  } catch {
+    // Fall through to candidate paths
+  }
+
+  // 2. Check known candidate paths.
+  for (const candidate of claudeCandidatePaths()) {
+    try {
+      await access(candidate, constants.X_OK)
+      return candidate
+    } catch {
+      // continue
+    }
+  }
+
+  // 3. Give up with a helpful diagnostic.
+  const searched = [
+    'PATH (via `command -v` / `where`)',
+    ...claudeCandidatePaths(),
+  ]
+  throw new LlmError(
+    `The \`claude\` executable was not found.\n`
+    + 'Searched:\n  - ' + searched.join('\n  - ') + '\n'
+    + 'Install Claude Code (https://claude.com/claude-code) and ensure it is on PATH, '
+    + 'or set the `executable` config to the absolute path.',
+    CLI_NOT_FOUND_CODE,
+  )
+}
+
 /** Everything needed to launch one CLI process. */
 export interface CliInvocation {
-  /** Path or command name of the `claude` executable. */
+  /** Resolved absolute path to the `claude` executable. */
   executable: string
   args: readonly string[]
   /** The stream-json user turn written to stdin, which is then closed. */

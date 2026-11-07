@@ -1,6 +1,6 @@
 {
   "name": "dsh-claude-cli",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Use the locally installed Claude Code CLI as a DeepSeek Harness LLM provider — no API key, native tool calls through an MCP bridge",
   "keywords": [
     "deepseek-harness",
