@@ -12,13 +12,13 @@
  */
 
 import {
-  CallId,
   EMPTY_RESPONSE_CODE,
   type ContentBlock,
   type FinishReason,
   type StreamChunk,
   type TokenUsage,
 } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
 import { classifyCliError, cliFailure, retryAfterMs, CLI_EXIT_CODE } from './failure.ts'
 import { parseCliLine, type CliLine, type WireUsage } from './protocol.ts'
 import { harnessToolName } from './tools.ts'
@@ -80,7 +80,7 @@ function closeBlock(block: OpenBlock): ContentBlock {
     case 'tool-call':
       return {
         type: 'tool-call',
-        id: CallId(block.callId ?? ''),
+        id: ToolCallId(block.callId ?? ''),
         name: block.toolName ?? '',
         arguments: block.text.length === 0 ? '{}' : block.text,
       }
@@ -220,7 +220,7 @@ export async function* translate(
           yield {
             type: 'tool-call-delta',
             index: block.index,
-            id: CallId(block.callId ?? ''),
+            id: ToolCallId(block.callId ?? ''),
             ...block.toolName === undefined ? {} : { name: block.toolName },
             argumentsDelta: fragment,
           }

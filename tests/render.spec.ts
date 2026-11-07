@@ -1,13 +1,37 @@
 import { describe, expect, it } from 'vitest'
-import { CallId, MessageId, type Message } from '@deepseek-ai/dsh-llm'
+import { MessageId, type Message } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
 import { IMAGE_PLACEHOLDER, renderConversation } from '../src/render.ts'
 
-/** Build a message without repeating identity and source boilerplate. */
-const message = (
-  role: Message['role'],
+/** Build a user message without repeating identity and source boilerplate. */
+const message = (role: 'user' | 'assistant', content: Message['content']): Message =>
+  role === 'user'
+    ? { id: MessageId(`m-${role}-${content.length}`), role, content, source: { kind: 'user' } }
+    : {
+        id: MessageId(`m-${role}-${content.length}`),
+        role,
+        content,
+        source: { kind: 'model', provider: 'anthropic-claude-cli', model: 'sonnet' },
+      }
+
+/**
+ * Build a `tool`-role result message.
+ *
+ * Results became their own message role in 0.2.2: the id and error flag live on
+ * the message, not on a content block.
+ */
+const toolResult = (
+  toolCallId: string,
   content: Message['content'],
-  source: Message['source'] = { kind: 'user' },
-): Message => ({ id: MessageId(`m-${role}-${content.length}`), role, content, source })
+  isError = false,
+): Message => ({
+  id: MessageId(`m-tool-${toolCallId}`),
+  role: 'tool',
+  content,
+  source: { kind: 'tool', callId: ToolCallId(toolCallId) },
+  toolCallId: ToolCallId(toolCallId),
+  ...isError ? { isError: true } : {},
+})
 
 describe('renderConversation', () => {
   it('sends a lone plain-text user turn unframed', () => {
@@ -18,11 +42,7 @@ describe('renderConversation', () => {
   it('frames a multi-turn conversation by role', () => {
     const rendered = renderConversation([
       message('user', [{ type: 'text', text: 'first' }]),
-      message('assistant', [{ type: 'text', text: 'second' }], {
-        kind: 'model',
-        provider: 'anthropic-claude-cli',
-        model: 'sonnet',
-      }),
+      message('assistant', [{ type: 'text', text: 'second' }]),
       message('user', [{ type: 'text', text: 'third' }]),
     ])
 
@@ -36,18 +56,9 @@ describe('renderConversation', () => {
       message('user', [{ type: 'text', text: 'list files' }]),
       message(
         'assistant',
-        [{ type: 'tool-call', id: CallId('c1'), name: 'bash', arguments: '{"command":"ls"}' }],
-        { kind: 'model', provider: 'anthropic-claude-cli', model: 'sonnet' },
+        [{ type: 'tool-call', id: ToolCallId('c1'), name: 'bash', arguments: '{"command":"ls"}' }],
       ),
-      message(
-        'user',
-        [{
-          type: 'tool-result',
-          toolCallId: CallId('c1'),
-          content: [{ type: 'text', text: 'a.txt' }],
-        }],
-        { kind: 'tool', callId: CallId('c1') },
-      ),
+      toolResult('c1', [{ type: 'text', text: 'a.txt' }]),
     ])
 
     expect(rendered).toContain('<tool-call id="c1" name="bash">{"command":"ls"}</tool-call>')
@@ -57,16 +68,7 @@ describe('renderConversation', () => {
   it('marks a failed tool result', () => {
     const rendered = renderConversation([
       message('user', [{ type: 'text', text: 'x' }]),
-      message(
-        'user',
-        [{
-          type: 'tool-result',
-          toolCallId: CallId('c2'),
-          content: [{ type: 'text', text: 'boom' }],
-          isError: true,
-        }],
-        { kind: 'tool', callId: CallId('c2') },
-      ),
+      toolResult('c2', [{ type: 'text', text: 'boom' }], true),
     ])
 
     expect(rendered).toContain('<tool-result id="c2" error="true">')
@@ -100,7 +102,7 @@ describe('renderConversation', () => {
       message('assistant', [
         { type: 'reasoning', text: 'private deliberation' },
         { type: 'text', text: 'answer' },
-      ], { kind: 'model', provider: 'anthropic-claude-cli', model: 'sonnet' }),
+      ]),
     ])
 
     expect(rendered).not.toContain('private deliberation')

@@ -16,7 +16,9 @@
  * @module dsh-claude-cli/render
  */
 
-import type { ContentBlock, Message } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import type { Message, ToolResultMessage } from '@deepseek-ai/dsh-llm/message'
+import type { RequestMessage } from '@deepseek-ai/dsh-llm/types'
 
 /** Text substituted for an image block, which the CLI has no way to accept. */
 export const IMAGE_PLACEHOLDER = '[image omitted: the anthropic-claude-cli provider cannot send images]'
@@ -53,14 +55,6 @@ function renderBlocks(blocks: readonly ContentBlock[]): string[] {
           + `${escapeText(block.arguments)}</tool-call>`,
         )
         break
-      case 'tool-result': {
-        const inner = renderBlocks(block.content).join('\n')
-        lines.push(
-          `<tool-result id="${escapeText(block.toolCallId)}"`
-          + `${block.isError ? ' error="true"' : ''}>\n${inner}\n</tool-result>`,
-        )
-        break
-      }
       case 'image':
         lines.push(IMAGE_PLACEHOLDER)
         break
@@ -79,6 +73,33 @@ function renderBlocks(blocks: readonly ContentBlock[]): string[] {
 }
 
 /**
+ * Render one message into a transcript frame.
+ *
+ * A tool result is its own message role in the 0.2.2 vocabulary, so it renders
+ * from its `toolCallId`/`isError` fields rather than from a content block. A
+ * `developer` message carries tool additions and removals, which are harness
+ * bookkeeping the CLI has no representation for and which contribute nothing.
+ *
+ * @param message - one request message, in conversation order.
+ * @returns the frame lines, or an empty array when the message renders empty.
+ */
+function renderMessage(message: Message): string[] {
+  if (message.role === 'tool') {
+    const toolMsg = message as ToolResultMessage
+    const inner = renderBlocks(toolMsg.content).join('\n')
+    return [
+      `<tool-result id="${escapeText(toolMsg.toolCallId)}"`
+      + `${toolMsg.isError === true ? ' error="true"' : ''}>\n${inner}\n</tool-result>`,
+    ]
+  }
+  if (message.role === 'developer') return []
+  const lines = renderBlocks(message.content)
+  if (lines.length === 0) return []
+  const tag = message.role === 'assistant' ? 'assistant' : 'user'
+  return [`<${tag}>\n${lines.join('\n')}\n</${tag}>`]
+}
+
+/**
  * Render harness history into the text of one CLI user turn.
  *
  * A conversation whose only message is plain user text renders as that text
@@ -87,20 +108,26 @@ function renderBlocks(blocks: readonly ContentBlock[]): string[] {
  * @param messages - the request's ordered messages, after the system slot.
  * @returns the user-turn text; empty only when every message rendered empty.
  */
-export function renderConversation(messages: readonly Message[]): string {
+export function renderConversation(messages: readonly RequestMessage[]): string {
   if (messages.length === 1) {
     const only = messages[0]!
-    if (only.role === 'user' && only.content.every((block) => block.type === 'text')) {
-      return only.content.map((block) => block.type === 'text' ? block.text : '').join('\n')
+    if (only.role === 'user' && only.content.every((block: ContentBlock) => block.type === 'text')) {
+      return only.content.map((block: ContentBlock) => block.type === 'text' ? block.text : '').join('\n')
     }
   }
 
   const parts: string[] = []
   for (const message of messages) {
-    const lines = renderBlocks(message.content)
-    if (lines.length === 0) continue
-    const tag = message.role === 'assistant' ? 'assistant' : 'user'
-    parts.push(`<${tag}>\n${lines.join('\n')}\n</${tag}>`)
+    if (message.role === 'user' && 'id' in message === false) {
+      // RequestUserInput: minimal user message without id/source
+      if (message.content.every((block: ContentBlock) => block.type === 'text')) {
+        parts.push(message.content.map((block: ContentBlock) => block.type === 'text' ? block.text : '').join('\n'))
+      } else {
+        parts.push(...renderBlocks(message.content))
+      }
+    } else {
+      parts.push(...renderMessage(message as Message))
+    }
   }
   if (parts.length === 0) return ''
   return [
